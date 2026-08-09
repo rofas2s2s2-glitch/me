@@ -1,0 +1,318 @@
+name: Calibration DLL Analysis
+
+on:
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  analyze:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Find Calibration ZIP
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem `
+            -Path $env:GITHUB_WORKSPACE `
+            -Filter "*.zip" `
+            -Recurse |
+            Select-Object -First 1
+
+          if (-not $zip) {
+            throw "Calibration ZIP was not found."
+          }
+
+          Write-Host "ZIP found:"
+          Write-Host $zip.FullName
+
+          $extract = Join-Path $env:RUNNER_TEMP "CalibrationAnalysis"
+
+          if (Test-Path $extract) {
+            Remove-Item $extract -Recurse -Force
+          }
+
+          New-Item `
+            -ItemType Directory `
+            -Path $extract |
+            Out-Null
+
+          Expand-Archive `
+            -Path $zip.FullName `
+            -DestinationPath $extract `
+            -Force
+
+          $dll = Get-ChildItem `
+            -Path $extract `
+            -Filter "Sirona.Schick.SidexisPlugin.Velocity.Calibration.dll" `
+            -Recurse |
+            Select-Object -First 1
+
+          if (-not $dll) {
+            throw "Sirona calibration DLL was not found."
+          }
+
+          Write-Host "Calibration DLL found:"
+          Write-Host $dll.FullName
+
+          "DLL_PATH=$($dll.FullName)" |
+            Out-File $env:GITHUB_ENV -Append
+
+      - name: Analyze DLL
+        shell: pwsh
+        run: |
+          $report = Join-Path `
+            $env:GITHUB_WORKSPACE `
+            "CalibrationAnalysis.txt"
+
+          $dllPath = $env:DLL_PATH
+
+          "MyDent Calibration DLL Analysis" |
+            Out-File $report -Encoding UTF8
+
+          "================================" |
+            Out-File $report -Append -Encoding UTF8
+
+          "Date: $(Get-Date)" |
+            Out-File $report -Append -Encoding UTF8
+
+          "DLL: $dllPath" |
+            Out-File $report -Append -Encoding UTF8
+
+          "" |
+            Out-File $report -Append -Encoding UTF8
+
+          try {
+
+            # ==============================
+            # Assembly
+            # ==============================
+
+            $assemblyName =
+              [System.Reflection.AssemblyName]::GetAssemblyName(
+                $dllPath
+              )
+
+            "[ASSEMBLY]" |
+              Out-File $report -Append -Encoding UTF8
+
+            "Name: $($assemblyName.Name)" |
+              Out-File $report -Append -Encoding UTF8
+
+            "Version: $($assemblyName.Version)" |
+              Out-File $report -Append -Encoding UTF8
+
+            "" |
+              Out-File $report -Append -Encoding UTF8
+
+
+            # ==============================
+            # Load
+            # ==============================
+
+            $assembly =
+              [System.Reflection.Assembly]::LoadFrom(
+                $dllPath
+              )
+
+            "FullName: $($assembly.FullName)" |
+              Out-File $report -Append -Encoding UTF8
+
+
+            # ==============================
+            # Dependencies
+            # ==============================
+
+            "" |
+              Out-File $report -Append -Encoding UTF8
+
+            "[REFERENCED ASSEMBLIES]" |
+              Out-File $report -Append -Encoding UTF8
+
+            foreach (
+              $ref in (
+                $assembly.GetReferencedAssemblies() |
+                Sort-Object Name
+              )
+            ) {
+
+              "- $($ref.FullName)" |
+                Out-File $report -Append -Encoding UTF8
+            }
+
+
+            # ==============================
+            # Types / Methods / Properties
+            # ==============================
+
+            "" |
+              Out-File $report -Append -Encoding UTF8
+
+            "[TYPES AND MEMBERS]" |
+              Out-File $report -Append -Encoding UTF8
+
+            $types =
+              $assembly.GetTypes() |
+              Sort-Object FullName
+
+            foreach ($type in $types) {
+
+              "" |
+                Out-File $report -Append -Encoding UTF8
+
+              "TYPE: $($type.FullName)" |
+                Out-File $report -Append -Encoding UTF8
+
+              "BASE: $($type.BaseType.FullName)" |
+                Out-File $report -Append -Encoding UTF8
+
+
+              foreach (
+                $ctor in (
+                  $type.GetConstructors(
+                    [System.Reflection.BindingFlags]
+                    "Public,NonPublic,Instance,Static"
+                  )
+                )
+              ) {
+
+                $parameters =
+                  (
+                    $ctor.GetParameters() |
+                    ForEach-Object {
+                      "$($_.ParameterType.FullName) $($_.Name)"
+                    }
+                  ) -join ", "
+
+                "  CTOR: $($type.Name)($parameters)" |
+                  Out-File $report -Append -Encoding UTF8
+              }
+
+
+              foreach (
+                $property in (
+                  $type.GetProperties(
+                    [System.Reflection.BindingFlags]
+                    "Public,NonPublic,Instance,Static"
+                  ) |
+                  Sort-Object Name
+                )
+              ) {
+
+                "  PROPERTY: $($property.PropertyType.FullName) $($property.Name)" |
+                  Out-File $report -Append -Encoding UTF8
+              }
+
+
+              foreach (
+                $method in (
+                  $type.GetMethods(
+                    [System.Reflection.BindingFlags]
+                    "Public,NonPublic,Instance,Static,DeclaredOnly"
+                  ) |
+                  Sort-Object Name
+                )
+              ) {
+
+                $parameters =
+                  (
+                    $method.GetParameters() |
+                    ForEach-Object {
+                      "$($_.ParameterType.FullName) $($_.Name)"
+                    }
+                  ) -join ", "
+
+                "  METHOD: $($method.ReturnType.FullName) $($method.Name)($parameters)" |
+                  Out-File $report -Append -Encoding UTF8
+              }
+            }
+
+
+            # ==============================
+            # Calibration Search
+            # ==============================
+
+            "" |
+              Out-File $report -Append -Encoding UTF8
+
+            "[CALIBRATION RELATED API]" |
+              Out-File $report -Append -Encoding UTF8
+
+            $keywords = @(
+              "calibr",
+              "sensor",
+              "probe",
+              "velocity",
+              "device",
+              "capture",
+              "gain",
+              "offset",
+              "correction",
+              "reference",
+              "factory",
+              "reset"
+            )
+
+            foreach ($type in $types) {
+
+              foreach (
+                $member in (
+                  $type.GetMembers(
+                    [System.Reflection.BindingFlags]
+                    "Public,NonPublic,Instance,Static"
+                  )
+                )
+              ) {
+
+                $text =
+                  "$($type.FullName)::$($member.Name)"
+
+                foreach ($keyword in $keywords) {
+
+                  if (
+                    $text.ToLower().Contains(
+                      $keyword.ToLower()
+                    )
+                  ) {
+
+                    "- $text" |
+                      Out-File $report -Append -Encoding UTF8
+
+                    break
+                  }
+                }
+              }
+            }
+
+
+            "" |
+              Out-File $report -Append -Encoding UTF8
+
+            "================================" |
+              Out-File $report -Append -Encoding UTF8
+
+            "ANALYSIS COMPLETED" |
+              Out-File $report -Append -Encoding UTF8
+
+            "No DLL methods were executed." |
+              Out-File $report -Append -Encoding UTF8
+
+          }
+          catch {
+
+            "[ERROR]" |
+              Out-File $report -Append -Encoding UTF8
+
+            $_.Exception.ToString() |
+              Out-File $report -Append -Encoding UTF8
+          }
+
+      - name: Upload Analysis Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: CalibrationAnalysis
+          path: CalibrationAnalysis.txt
